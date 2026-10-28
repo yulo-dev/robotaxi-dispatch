@@ -31,3 +31,13 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -race ./...
+
+  sim-smoke:
+    needs: unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go run ./cmd/sim -minutes 10 -seeds 1
