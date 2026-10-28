@@ -1,0 +1,5 @@
+/bin/
+*.out
+*.test
+out.json
+/.env
