@@ -1,12 +1,16 @@
 GO ?= go
 
-.PHONY: build test lint fmt up down sim bench
+.PHONY: build test test-integration lint fmt up down migrate sim bench
 
 build:
 	$(GO) build ./...
 
 test:
 	$(GO) test -race ./...
+
+# Needs Postgres (and Redis from M5); see docker-compose.yml or TEST_DATABASE_URL.
+test-integration:
+	$(GO) test -race -p 1 -tags integration ./...
 
 lint:
 	@test -z "$$(gofmt -l .)" || (gofmt -l . && echo "gofmt needed" && exit 1)
@@ -20,6 +24,11 @@ up:
 
 down:
 	docker compose down -v
+
+DATABASE_URL ?= postgres://dispatch:dispatch@localhost:5432/dispatch?sslmode=disable
+
+migrate:
+	DATABASE_URL=$(DATABASE_URL) $(GO) run ./cmd/api migrate
 
 SIM_FLAGS ?= -vehicles 80 -rate 150 -peak 3 -minutes 120 -seeds 5 -batch 2s
 
