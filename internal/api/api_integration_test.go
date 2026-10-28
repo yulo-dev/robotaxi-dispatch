@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/yulo-dev/robotaxi-dispatch/internal/api"
+	"github.com/yulo-dev/robotaxi-dispatch/internal/dispatch"
+	"github.com/yulo-dev/robotaxi-dispatch/internal/geo"
 	"github.com/yulo-dev/robotaxi-dispatch/internal/store"
 	"github.com/yulo-dev/robotaxi-dispatch/internal/testdb"
 )
@@ -227,5 +229,60 @@ func TestReadyz(t *testing.T) {
 	ts, _ := newServer(t)
 	if resp, _ := do(t, http.MethodGet, ts.URL+"/readyz", "", nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("readyz %d", resp.StatusCode)
+	}
+}
+
+func TestTripEndpoints(t *testing.T) {
+	st := testdb.Open(t)
+	c := testdb.Redis(t)
+	n, err := geo.NewGrid(geo.DefaultGridConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := dispatch.New(dispatch.DefaultConfig(), st, c, geo.NewRouter(n, 0), nil, nil)
+	srv := &api.Server{Store: st, Cache: c, Dispatcher: svc, HeartbeatWriteInterval: 5 * time.Second}
+	ts := httptest.NewServer(srv.Router())
+	defer ts.Close()
+
+	if resp, body := do(t, http.MethodPost, ts.URL+"/v1/vehicles", "", map[string]any{"id": "v1", "lat": 37.77, "lng": -122.42, "battery_pct": 90}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("register: %d %s", resp.StatusCode, body)
+	}
+	_, body := do(t, http.MethodPost, ts.URL+"/v1/rides", "trip-1", rideBody)
+	var r store.Ride
+	_ = json.Unmarshal(body, &r)
+	if err := svc.ProcessBatch(context.Background(), []string{r.ID}); err != nil {
+		t.Fatal(err)
+	}
+	post := func(path string, body any) int {
+		resp, _ := do(t, http.MethodPost, ts.URL+"/v1"+path, "", body)
+		return resp.StatusCode
+	}
+	if code := post("/rides/"+r.ID+"/pickup", map[string]string{"vehicle_id": "v1"}); code != http.StatusConflict {
+		t.Fatalf("pickup before accept: %d, want 409", code)
+	}
+	if code := post("/dispatch/"+r.ID+"/decision", map[string]string{"vehicle_id": "v1", "decision": "ACCEPT"}); code != http.StatusOK {
+		t.Fatalf("accept: %d", code)
+	}
+	if code := post("/rides/"+r.ID+"/pickup", map[string]string{"vehicle_id": "v9"}); code != http.StatusConflict {
+		t.Fatalf("pickup by wrong vehicle: %d, want 409", code)
+	}
+	if code := post("/rides/"+r.ID+"/pickup", map[string]string{}); code != http.StatusBadRequest {
+		t.Fatalf("missing vehicle_id: %d", code)
+	}
+	if code := post("/rides/"+r.ID+"/pickup", map[string]string{"vehicle_id": "v1"}); code != http.StatusOK {
+		t.Fatalf("pickup: %d", code)
+	}
+	if code := post("/rides/"+r.ID+"/complete", map[string]string{"vehicle_id": "v1"}); code != http.StatusOK {
+		t.Fatalf("complete: %d", code)
+	}
+	if code := post("/rides/"+r.ID+"/complete", map[string]string{"vehicle_id": "v1"}); code != http.StatusConflict {
+		t.Fatalf("second complete: %d, want 409", code)
+	}
+	if code := post("/dispatch/"+r.ID+"/decision", map[string]string{"vehicle_id": "v1", "decision": "MAYBE"}); code != http.StatusBadRequest {
+		t.Fatalf("bad decision: %d", code)
+	}
+	v, err := st.GetVehicle(context.Background(), "v1")
+	if err != nil || v.Status != store.VehicleAvailable {
+		t.Fatalf("vehicle after complete: %+v %v", v, err)
 	}
 }

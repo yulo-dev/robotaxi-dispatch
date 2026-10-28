@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/yulo-dev/robotaxi-dispatch/internal/cache"
 	"github.com/yulo-dev/robotaxi-dispatch/internal/store"
 )
 
@@ -30,9 +31,24 @@ func Open(t *testing.T) *store.Store {
 	if err := st.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if _, err := st.Pool().Exec(ctx, `TRUNCATE rides, vehicles, outbox_events, idempotency_keys RESTART IDENTITY CASCADE`); err != nil {
+	if _, err := st.Pool().Exec(ctx, `TRUNCATE ride_rejections, rides, vehicles, outbox_events, idempotency_keys RESTART IDENTITY CASCADE`); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 	t.Cleanup(st.Close)
 	return st
+}
+
+// Redis returns a flushed Redis cache at TEST_REDIS_ADDR (default localhost:6379).
+func Redis(t *testing.T) *cache.Cache {
+	t.Helper()
+	addr := os.Getenv("TEST_REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+	c := cache.New(addr, 0)
+	if err := c.Client().FlushDB(context.Background()).Err(); err != nil {
+		t.Fatalf("redis: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
 }
