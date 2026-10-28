@@ -40,6 +40,12 @@ func unpublished(t *testing.T, st *store.Store) int {
 	return n
 }
 
+func unpublishedCount(st *store.Store) int {
+	var n int
+	_ = st.Pool().QueryRow(context.Background(), `SELECT count(*) FROM outbox_events WHERE published_at IS NULL`).Scan(&n)
+	return n
+}
+
 type recorder struct {
 	mu  sync.Mutex
 	ids []string
@@ -129,8 +135,8 @@ func TestConcurrentPublishersDeliverEachRowOnce(t *testing.T) {
 					t.Error(err)
 					return
 				}
-				if n == 0 {
-					return
+				if n == 0 && unpublishedCount(st) == 0 {
+					return // n == 0 alone can mean other workers hold the rows
 				}
 			}
 		}()
