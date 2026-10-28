@@ -7,6 +7,12 @@ linters:
     - errorlint
     - misspell
     - unconvert
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
 
 formatters:
   enable:
