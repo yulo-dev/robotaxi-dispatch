@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: build test test-integration lint fmt up down migrate sim bench
+.PHONY: build test test-integration lint fmt up down migrate seed sim bench loadtest
 
 build:
 	$(GO) build ./...
@@ -41,3 +41,11 @@ bench:
 	@mkdir -p bin docs
 	$(GO) test -run '^$$' -bench 'BenchmarkHungarian|BenchmarkGreedy|BenchmarkAStar|BenchmarkDijkstra' -benchtime 2s ./internal/assign ./internal/geo | tee bin/gobench.txt
 	$(GO) run ./cmd/sim $(SIM_FLAGS) -sweep 40,60,80,100,120 -gobench bin/gobench.txt -results docs/results.md -json bin/results.json
+
+# Registers N vehicles against a running API (default 200).
+seed:
+	./scripts/seed.sh $(or $(N),200)
+
+# Needs a running stack (make up) and k6 installed. Writes docs/loadtest.md.
+loadtest:
+	./scripts/loadtest/run.sh
