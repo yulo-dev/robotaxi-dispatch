@@ -3,3 +3,4 @@
 *.test
 out.json
 /.env
+dump.rdb
