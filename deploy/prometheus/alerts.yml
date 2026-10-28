@@ -1,0 +1,35 @@
+groups:
+  - name: dispatch
+    rules:
+      - alert: OutboxBacklogHigh
+        expr: dispatch_outbox_backlog > 1000
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Outbox backlog above 1000 rows for 1 minute"
+          description: "Committed rides are not reaching the dispatcher. Check the publisher logs and Postgres."
+
+      # Conflicts are expected under contention; alert when the 5 minute rate
+      # is both material and well above the hourly baseline.
+      - alert: AssignmentConflictSpike
+        expr: |
+          rate(dispatch_assignment_conflicts_total[5m]) > 0.5
+          and
+          rate(dispatch_assignment_conflicts_total[5m]) > 3 * rate(dispatch_assignment_conflicts_total[1h])
+        for: 2m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Assignment conflict rate spiked"
+          description: "Workers are colliding on rides or vehicles more than usual (stale GEO index, lock TTL too short, or a duplicate deployment)."
+
+      - alert: TimeToAssignP95High
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(dispatch_time_to_assign_seconds_bucket[5m]))) > 30
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "p95 time to assign above 30 s"
+          description: "Riders wait more than 30 s for a vehicle to accept. Check available_vehicles and rejection rate."

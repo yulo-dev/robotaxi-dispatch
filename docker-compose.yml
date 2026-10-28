@@ -21,6 +21,14 @@ services:
       timeout: 2s
       retries: 30
 
+  migrate:
+    build: .
+    command: ["migrate"]
+    environment:
+      DATABASE_URL: postgres://dispatch:dispatch@postgres:5432/dispatch?sslmode=disable
+    depends_on:
+      postgres: {condition: service_healthy}
+
   api:
     build: .
     environment:
@@ -29,5 +37,12 @@ services:
       REDIS_ADDR: redis:6379
     ports: ["8080:8080"]
     depends_on:
-      postgres: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+    ports: ["9090:9090"]
+    depends_on: [api]
