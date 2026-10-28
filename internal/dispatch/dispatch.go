@@ -360,8 +360,8 @@ func (s *Service) commitPair(ctx context.Context, ride store.Ride, vehicleID str
 	if err != nil {
 		return err
 	}
-	// Removes the vehicle from vehicles:geo.
-	if err := s.cache.UpsertVehicle(ctx, veh); err != nil {
+	// Removes the vehicle from vehicles:geo and records its ride.
+	if err := s.cache.UpsertVehicleRide(ctx, veh, ride.ID); err != nil {
 		s.log.Warn("cache update after dispatch failed", "vehicle", vehicleID, "err", err)
 	}
 	s.log.Info("ride dispatched", "ride", ride.ID, "vehicle", vehicleID)
@@ -389,7 +389,7 @@ func (s *Service) Decide(ctx context.Context, rideID, vehicleID string, accept b
 		if err != nil {
 			return ride, err
 		}
-		s.syncVehicle(ctx, veh)
+		s.syncVehicle(ctx, veh, rideID)
 		s.obs.RideAssigned(s.now().Sub(ride.RequestedAt))
 		return ride, nil
 	}
@@ -401,7 +401,7 @@ func (s *Service) release(ctx context.Context, rideID, vehicleID, reason string)
 	if err != nil {
 		return ride, err
 	}
-	s.syncVehicle(ctx, veh)
+	s.syncVehicle(ctx, veh, "")
 	s.obs.Rejection()
 	// The outbox row written with the rejection also requeues the ride; this
 	// direct enqueue only avoids waiting for the next publisher poll.
@@ -413,7 +413,7 @@ func (s *Service) release(ctx context.Context, rideID, vehicleID, reason string)
 func (s *Service) Pickup(ctx context.Context, rideID, vehicleID string) (store.Ride, error) {
 	ride, veh, err := s.store.PickupRide(ctx, rideID, vehicleID)
 	if err == nil {
-		s.syncVehicle(ctx, veh)
+		s.syncVehicle(ctx, veh, rideID)
 	}
 	return ride, err
 }
@@ -422,13 +422,13 @@ func (s *Service) Pickup(ctx context.Context, rideID, vehicleID string) (store.R
 func (s *Service) Complete(ctx context.Context, rideID, vehicleID string) (store.Ride, error) {
 	ride, veh, err := s.store.CompleteRide(ctx, rideID, vehicleID)
 	if err == nil {
-		s.syncVehicle(ctx, veh)
+		s.syncVehicle(ctx, veh, "")
 	}
 	return ride, err
 }
 
-func (s *Service) syncVehicle(ctx context.Context, v store.Vehicle) {
-	if err := s.cache.UpsertVehicle(ctx, v); err != nil {
+func (s *Service) syncVehicle(ctx context.Context, v store.Vehicle, rideID string) {
+	if err := s.cache.UpsertVehicleRide(ctx, v, rideID); err != nil {
 		s.log.Warn("cache update failed", "vehicle", v.ID, "err", err)
 	}
 }

@@ -21,7 +21,9 @@ import (
 // search. Implemented by the Redis cache; nil disables it.
 type VehicleCache interface {
 	UpsertVehicle(ctx context.Context, v store.Vehicle) error
+	UpsertVehicleRide(ctx context.Context, v store.Vehicle, rideID string) error
 	UpdateLocation(ctx context.Context, id string, lat, lng, battery float64, at time.Time) error
+	ActiveRide(ctx context.Context, vehicleID string) (string, error)
 	Ping(ctx context.Context) error
 }
 
@@ -273,7 +275,9 @@ type heartbeatRequest struct {
 }
 
 // heartbeat always refreshes the cache; the Postgres row is written at most
-// once per HeartbeatWriteInterval per vehicle unless the reported status changes.
+// once per HeartbeatWriteInterval per vehicle unless the reported status
+// changes. The response carries the vehicle's active ride, which is how a
+// vehicle learns it has been dispatched.
 func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req heartbeatRequest
@@ -298,7 +302,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 					s.Log.Warn("cache update failed", "vehicle", id, "err", err)
 				}
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"id": id, "persisted": false})
+			writeJSON(w, http.StatusOK, map[string]any{"id": id, "persisted": false, "ride_id": s.activeRide(r.Context(), id)})
 			return
 		}
 	}
@@ -309,7 +313,18 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	s.throttle.Store(id, heartbeatState{at: now, status: v.Status})
 	s.syncCache(r.Context(), v)
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": v.Status, "persisted": true})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": v.Status, "persisted": true, "ride_id": s.activeRide(r.Context(), id)})
+}
+
+func (s *Server) activeRide(ctx context.Context, vehicleID string) *string {
+	if s.Cache == nil {
+		return nil
+	}
+	id, err := s.Cache.ActiveRide(ctx, vehicleID)
+	if err != nil || id == "" {
+		return nil
+	}
+	return &id
 }
 
 // ---- rides ----
@@ -374,9 +389,11 @@ func (s *Server) cancelRide(w http.ResponseWriter, r *http.Request) {
 		s.storeError(w, err)
 		return
 	}
-	if freed != "" {
+	if freed != "" && s.Cache != nil {
 		if v, err := s.Store.GetVehicle(r.Context(), freed); err == nil {
-			s.syncCache(r.Context(), v)
+			if err := s.Cache.UpsertVehicleRide(r.Context(), v, ""); err != nil {
+				s.Log.Warn("cache update failed", "vehicle", v.ID, "err", err)
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, ride)

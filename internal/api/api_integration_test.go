@@ -257,6 +257,16 @@ func TestTripEndpoints(t *testing.T) {
 		resp, _ := do(t, http.MethodPost, ts.URL+"/v1"+path, "", body)
 		return resp.StatusCode
 	}
+	rideOnHeartbeat := func() any {
+		_, body := do(t, http.MethodPost, ts.URL+"/v1/vehicles/v1/heartbeat", "",
+			map[string]any{"lat": 37.77, "lng": -122.42, "battery_pct": 80})
+		var out map[string]any
+		_ = json.Unmarshal(body, &out)
+		return out["ride_id"]
+	}
+	if got := rideOnHeartbeat(); got != r.ID {
+		t.Fatalf("heartbeat ride_id %v, want %s", got, r.ID)
+	}
 	if code := post("/rides/"+r.ID+"/pickup", map[string]string{"vehicle_id": "v1"}); code != http.StatusConflict {
 		t.Fatalf("pickup before accept: %d, want 409", code)
 	}
@@ -284,5 +294,8 @@ func TestTripEndpoints(t *testing.T) {
 	v, err := st.GetVehicle(context.Background(), "v1")
 	if err != nil || v.Status != store.VehicleAvailable {
 		t.Fatalf("vehicle after complete: %+v %v", v, err)
+	}
+	if got := rideOnHeartbeat(); got != nil {
+		t.Fatalf("heartbeat ride_id after complete %v, want null", got)
 	}
 }

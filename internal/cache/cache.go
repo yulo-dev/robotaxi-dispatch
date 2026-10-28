@@ -3,7 +3,7 @@
 // Keys:
 //
 //	vehicles:geo      GEO set of AVAILABLE vehicles only
-//	vehicle:{id}      HASH status, version, lat, lng, battery, hb (unix ms)
+//	vehicle:{id}      HASH status, version, ride, lat, lng, battery, hb (unix ms)
 //	lock:ride:{id}    STRING token, SET NX PX
 //	lock:vehicle:{id} STRING token, SET NX PX
 package cache
@@ -52,12 +52,18 @@ func (c *Cache) Ping(ctx context.Context) error { return c.rdb.Ping(ctx).Err() }
 // resulting status.
 //
 // KEYS[1]=vehicle hash, KEYS[2]=geo set
-// ARGV: id, version (-1 = location only), status, lat, lng, battery, hb_ms
+// ARGV: id, version (-1 = location only), status, lat, lng, battery, hb_ms,
+// ride op ("keep", "clear", or "set"), ride id
 var upsertScript = redis.NewScript(`
 local cur = tonumber(redis.call('HGET', KEYS[1], 'version') or '-1')
 local v = tonumber(ARGV[2])
 if v >= 0 and v >= cur then
   redis.call('HSET', KEYS[1], 'version', ARGV[2], 'status', ARGV[3])
+  if ARGV[8] == 'clear' then
+    redis.call('HDEL', KEYS[1], 'ride')
+  elseif ARGV[8] == 'set' then
+    redis.call('HSET', KEYS[1], 'ride', ARGV[9])
+  end
 end
 redis.call('HSET', KEYS[1], 'lat', ARGV[4], 'lng', ARGV[5], 'battery', ARGV[6], 'hb', ARGV[7])
 local st = redis.call('HGET', KEYS[1], 'status')
@@ -69,20 +75,41 @@ end
 return st
 `)
 
-func (c *Cache) upsert(ctx context.Context, id string, version int64, status string, lat, lng, battery float64, hb time.Time) error {
+func (c *Cache) upsert(ctx context.Context, id string, version int64, status string, lat, lng, battery float64,
+	hb time.Time, rideOp, rideID string) error {
 	return upsertScript.Run(ctx, c.rdb, []string{vehicleKey(id), geoKey},
-		id, version, status, lat, lng, battery, hb.UnixMilli()).Err()
+		id, version, status, lat, lng, battery, hb.UnixMilli(), rideOp, rideID).Err()
 }
 
-// UpsertVehicle mirrors a vehicle row read from Postgres.
+// UpsertVehicle mirrors a vehicle row read from Postgres, leaving the
+// vehicle's active ride field unchanged.
 func (c *Cache) UpsertVehicle(ctx context.Context, v store.Vehicle) error {
-	return c.upsert(ctx, v.ID, v.Version, string(v.Status), v.Lat, v.Lng, v.BatteryPct, v.LastHeartbeatAt)
+	return c.upsert(ctx, v.ID, v.Version, string(v.Status), v.Lat, v.Lng, v.BatteryPct, v.LastHeartbeatAt, "keep", "")
+}
+
+// UpsertVehicleRide mirrors a vehicle row and records its active ride
+// (rideID "" clears it). Written by the dispatcher after each transition.
+func (c *Cache) UpsertVehicleRide(ctx context.Context, v store.Vehicle, rideID string) error {
+	op := "set"
+	if rideID == "" {
+		op = "clear"
+	}
+	return c.upsert(ctx, v.ID, v.Version, string(v.Status), v.Lat, v.Lng, v.BatteryPct, v.LastHeartbeatAt, op, rideID)
 }
 
 // UpdateLocation refreshes position, battery, and heartbeat time without
 // touching status. Used for heartbeats that skip the Postgres write.
 func (c *Cache) UpdateLocation(ctx context.Context, id string, lat, lng, battery float64, at time.Time) error {
-	return c.upsert(ctx, id, -1, "", lat, lng, battery, at)
+	return c.upsert(ctx, id, -1, "", lat, lng, battery, at, "keep", "")
+}
+
+// ActiveRide returns the ride the vehicle is bound to, or "".
+func (c *Cache) ActiveRide(ctx context.Context, vehicleID string) (string, error) {
+	id, err := c.rdb.HGet(ctx, vehicleKey(vehicleID), "ride").Result()
+	if errors.Is(err, redis.Nil) {
+		return "", nil
+	}
+	return id, err
 }
 
 // Candidate is a vehicle returned by a GEO search.
