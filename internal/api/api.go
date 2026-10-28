@@ -21,12 +21,16 @@ import (
 // search. Implemented by the Redis cache; nil disables it.
 type VehicleCache interface {
 	UpsertVehicle(ctx context.Context, v store.Vehicle) error
+	UpdateLocation(ctx context.Context, id string, lat, lng, battery float64, at time.Time) error
 	Ping(ctx context.Context) error
 }
 
-// Dispatcher receives vehicle decisions. Nil disables the decision endpoint.
+// Dispatcher owns vehicle decisions and the trip lifecycle. Nil disables
+// those endpoints.
 type Dispatcher interface {
 	Decide(ctx context.Context, rideID, vehicleID string, accept bool) (store.Ride, error)
+	Pickup(ctx context.Context, rideID, vehicleID string) (store.Ride, error)
+	Complete(ctx context.Context, rideID, vehicleID string) (store.Ride, error)
 }
 
 // Observer receives API events for metrics. All methods may be no-ops.
@@ -91,6 +95,8 @@ func (s *Server) Router() http.Handler {
 		r.With(requireIdempotency).Post("/rides", s.createRide)
 		r.Get("/rides/{id}", s.getRide)
 		r.Post("/rides/{id}/cancel", s.cancelRide)
+		r.Post("/rides/{id}/pickup", s.tripStep(func(d Dispatcher) func(context.Context, string, string) (store.Ride, error) { return d.Pickup }))
+		r.Post("/rides/{id}/complete", s.tripStep(func(d Dispatcher) func(context.Context, string, string) (store.Ride, error) { return d.Complete }))
 		r.Post("/dispatch/{ride_id}/decision", s.decision)
 	})
 	return r
@@ -180,7 +186,7 @@ func (s *Server) storeError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	case errors.As(err, &te):
 		writeError(w, http.StatusConflict, "illegal_transition", te.Error())
-	case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrVehicleBusy):
+	case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrVehicleBusy), errors.Is(err, store.ErrWrongVehicle):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
 	case errors.Is(err, store.ErrExists):
 		writeError(w, http.StatusConflict, "already_exists", err.Error())
@@ -287,11 +293,12 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	if prev, ok := s.throttle.Load(id); ok {
 		st := prev.(heartbeatState)
 		if now.Sub(st.at) < s.HeartbeatWriteInterval && (req.Status == "" || req.Status == st.status) {
-			s.syncCache(r.Context(), store.Vehicle{
-				ID: id, Status: st.status, Lat: req.Lat, Lng: req.Lng,
-				BatteryPct: req.BatteryPct, LastHeartbeatAt: now,
-			})
-			writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": st.status, "persisted": false})
+			if s.Cache != nil {
+				if err := s.Cache.UpdateLocation(r.Context(), id, req.Lat, req.Lng, req.BatteryPct, now); err != nil {
+					s.Log.Warn("cache update failed", "vehicle", id, "err", err)
+				}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"id": id, "persisted": false})
 			return
 		}
 	}
@@ -409,4 +416,34 @@ func (s *Server) decision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ride)
+}
+
+type vehicleRef struct {
+	VehicleID string `json:"vehicle_id"`
+}
+
+// tripStep handles pickup and complete: body {vehicle_id}; 409 when the
+// transition is illegal or the vehicle is not the ride's vehicle.
+func (s *Server) tripStep(pick func(Dispatcher) func(context.Context, string, string) (store.Ride, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.Dispatcher == nil {
+			writeError(w, http.StatusServiceUnavailable, "dispatcher_unavailable", "dispatcher not running")
+			return
+		}
+		var req vehicleRef
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_json", err.Error())
+			return
+		}
+		if req.VehicleID == "" {
+			writeError(w, http.StatusBadRequest, "invalid_request", "vehicle_id is required")
+			return
+		}
+		ride, err := pick(s.Dispatcher)(r.Context(), chi.URLParam(r, "id"), req.VehicleID)
+		if err != nil {
+			s.storeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, ride)
+	}
 }

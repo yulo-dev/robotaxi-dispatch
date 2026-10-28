@@ -1,6 +1,6 @@
 // Command api runs the dispatch HTTP service.
 //
-//	api           serve HTTP
+//	api           serve HTTP, the outbox publisher, and the dispatcher
 //	api migrate   apply SQL migrations and exit
 package main
 
@@ -11,11 +11,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/yulo-dev/robotaxi-dispatch/internal/api"
+	"github.com/yulo-dev/robotaxi-dispatch/internal/cache"
 	"github.com/yulo-dev/robotaxi-dispatch/internal/config"
+	"github.com/yulo-dev/robotaxi-dispatch/internal/dispatch"
+	"github.com/yulo-dev/robotaxi-dispatch/internal/geo"
+	"github.com/yulo-dev/robotaxi-dispatch/internal/outbox"
 	"github.com/yulo-dev/robotaxi-dispatch/internal/store"
 )
 
@@ -50,12 +55,50 @@ func run(log *slog.Logger) error {
 		return nil
 	}
 
+	rc := cache.New(cfg.RedisAddr, 0)
+	defer func() { _ = rc.Close() }()
+
+	network, err := geo.NewGrid(geo.DefaultGridConfig())
+	if err != nil {
+		return err
+	}
+	router := geo.NewRouter(network, cfg.RouteCacheSize)
+
+	dcfg := dispatch.DefaultConfig()
+	dcfg.BatchWindow, dcfg.BatchMax = cfg.BatchWindow, cfg.BatchMax
+	dcfg.RadiusM, dcfg.ExpandM, dcfg.TopK = cfg.SearchRadiusM, cfg.ExpandRadiusM, cfg.TopK
+	dcfg.HeartbeatMaxAge, dcfg.DecisionTimeout, dcfg.MatchTimeout = cfg.HeartbeatMaxAge, cfg.DecisionTimeout, cfg.MatchTimeout
+	dcfg.MaxHungarian, dcfg.LockTTL = cfg.MaxHungarian, cfg.LockTTL
+	dcfg.Workers, dcfg.QueueSize = cfg.DispatchWorkers, cfg.QueueSize
+	dispatcher := dispatch.New(dcfg, st, rc, router, nil, log)
+
+	publisher := &outbox.Publisher{
+		Pool:    st.Pool(),
+		Sink:    dispatcher.Enqueue,
+		Poll:    cfg.OutboxPoll,
+		Workers: cfg.OutboxWorkers,
+		Log:     log,
+	}
+
 	srv := &api.Server{
 		Store:                  st,
+		Cache:                  rc,
+		Dispatcher:             dispatcher,
 		Log:                    log,
 		HeartbeatWriteInterval: cfg.HeartbeatWrite,
 	}
-	go cleanupIdempotencyKeys(ctx, st, cfg.IdempotencyTTL, log)
+
+	var wg sync.WaitGroup
+	start := func(f func(context.Context)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f(ctx)
+		}()
+	}
+	start(dispatcher.Run)
+	start(publisher.Run)
+	start(func(ctx context.Context) { cleanupIdempotencyKeys(ctx, st, cfg.IdempotencyTTL, log) })
 
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -68,15 +111,20 @@ func run(log *slog.Logger) error {
 		errc <- httpSrv.ListenAndServe()
 	}()
 	select {
-	case err := <-errc:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return err
+	case err = <-errc:
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
 		}
+		stop()
 	case <-ctx.Done():
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return httpSrv.Shutdown(shutdownCtx)
+	if serr := httpSrv.Shutdown(shutdownCtx); serr != nil && err == nil {
+		err = serr
+	}
+	wg.Wait()
+	return err
 }
 
 func cleanupIdempotencyKeys(ctx context.Context, st *store.Store, ttl time.Duration, log *slog.Logger) {
