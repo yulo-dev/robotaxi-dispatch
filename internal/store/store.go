@@ -180,13 +180,13 @@ func (s *Store) Heartbeat(ctx context.Context, id string, lat, lng, battery floa
 // ---- rides ----
 
 const rideCols = `id, rider_id, pickup_lat, pickup_lng, dropoff_lat, dropoff_lng, status, vehicle_id,
-	requested_at, assigned_at, picked_up_at, completed_at, version`
+	requested_at, assigned_at, picked_up_at, completed_at, dispatched_at, version`
 
 func scanRide(row pgx.Row) (Ride, error) {
 	var r Ride
 	var id uuid.UUID
 	err := row.Scan(&id, &r.RiderID, &r.PickupLat, &r.PickupLng, &r.DropoffLat, &r.DropoffLng, &r.Status,
-		&r.VehicleID, &r.RequestedAt, &r.AssignedAt, &r.PickedUpAt, &r.CompletedAt, &r.Version)
+		&r.VehicleID, &r.RequestedAt, &r.AssignedAt, &r.PickedUpAt, &r.CompletedAt, &r.DispatchedAt, &r.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return r, ErrNotFound
 	}
@@ -280,6 +280,11 @@ func insertOutbox(ctx context.Context, tx pgx.Tx, rideID, eventType string) erro
 	return err
 }
 
+func validUUID(id string) bool {
+	_, err := uuid.Parse(id)
+	return err == nil
+}
+
 // GetRide loads a ride.
 func (s *Store) GetRide(ctx context.Context, id string) (Ride, error) {
 	if _, err := uuid.Parse(id); err != nil {
@@ -306,7 +311,7 @@ func (s *Store) CancelRide(ctx context.Context, id string) (Ride, string, error)
 	if !CanTransition(cur.Status, RideCancelled) {
 		return cur, "", &TransitionError{From: cur.Status, To: RideCancelled}
 	}
-	out, err := scanRide(tx.QueryRow(ctx, `UPDATE rides SET status=$2, version=version+1
+	out, err := scanRide(tx.QueryRow(ctx, `UPDATE rides SET status=$2, version=version+1, dispatched_at=NULL
 		WHERE id=$1 RETURNING `+rideCols, id, RideCancelled))
 	if err != nil {
 		return Ride{}, "", err

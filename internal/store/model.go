@@ -102,7 +102,9 @@ type Ride struct {
 	AssignedAt  *time.Time `json:"assigned_at"`
 	PickedUpAt  *time.Time `json:"picked_up_at"`
 	CompletedAt *time.Time `json:"completed_at"`
-	Version     int64      `json:"version"`
+	// DispatchedAt is when the current vehicle was offered the ride.
+	DispatchedAt *time.Time `json:"dispatched_at"`
+	Version      int64      `json:"version"`
 }
 
 // Errors returned by the repository.
