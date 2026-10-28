@@ -1,0 +1,36 @@
+name: loadtest
+
+# Manual only: brings up the compose stack, runs the k6 scenario and the
+# invariant checks, and uploads the results.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  loadtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start stack
+        run: |
+          docker compose up -d --build
+          for i in $(seq 1 60); do curl -fsS localhost:8080/readyz && break; sleep 2; done
+      - name: Install k6
+        run: |
+          curl -fsSL https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz | tar xz
+          sudo mv k6-v0.54.0-linux-amd64/k6 /usr/local/bin/
+      - name: Run load test
+        run: make loadtest
+      - name: API logs
+        if: always()
+        run: docker compose logs api | tail -200
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest
+          path: |
+            bin/loadtest
+            docs/loadtest.md
