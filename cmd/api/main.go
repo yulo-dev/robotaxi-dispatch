@@ -20,6 +20,7 @@ import (
 	"github.com/yulo-dev/robotaxi-dispatch/internal/config"
 	"github.com/yulo-dev/robotaxi-dispatch/internal/dispatch"
 	"github.com/yulo-dev/robotaxi-dispatch/internal/geo"
+	"github.com/yulo-dev/robotaxi-dispatch/internal/metrics"
 	"github.com/yulo-dev/robotaxi-dispatch/internal/outbox"
 	"github.com/yulo-dev/robotaxi-dispatch/internal/store"
 )
@@ -55,6 +56,7 @@ func run(log *slog.Logger) error {
 		return nil
 	}
 
+	m := metrics.New()
 	rc := cache.New(cfg.RedisAddr, 0)
 	defer func() { _ = rc.Close() }()
 
@@ -63,6 +65,7 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	router := geo.NewRouter(network, cfg.RouteCacheSize)
+	router.OnRoute = m.AStar
 
 	dcfg := dispatch.DefaultConfig()
 	dcfg.BatchWindow, dcfg.BatchMax = cfg.BatchWindow, cfg.BatchMax
@@ -70,22 +73,25 @@ func run(log *slog.Logger) error {
 	dcfg.HeartbeatMaxAge, dcfg.DecisionTimeout, dcfg.MatchTimeout = cfg.HeartbeatMaxAge, cfg.DecisionTimeout, cfg.MatchTimeout
 	dcfg.MaxHungarian, dcfg.LockTTL = cfg.MaxHungarian, cfg.LockTTL
 	dcfg.Workers, dcfg.QueueSize = cfg.DispatchWorkers, cfg.QueueSize
-	dispatcher := dispatch.New(dcfg, st, rc, router, nil, log)
+	dispatcher := dispatch.New(dcfg, st, rc, router, m, log)
 
 	publisher := &outbox.Publisher{
-		Pool:    st.Pool(),
-		Sink:    dispatcher.Enqueue,
-		Poll:    cfg.OutboxPoll,
-		Workers: cfg.OutboxWorkers,
-		Log:     log,
+		Pool:     st.Pool(),
+		Sink:     dispatcher.Enqueue,
+		Poll:     cfg.OutboxPoll,
+		Workers:  cfg.OutboxWorkers,
+		Observer: m,
+		Log:      log,
 	}
 
 	srv := &api.Server{
 		Store:                  st,
 		Cache:                  rc,
 		Dispatcher:             dispatcher,
+		Observer:               m,
 		Log:                    log,
 		HeartbeatWriteInterval: cfg.HeartbeatWrite,
+		Extra:                  map[string]http.Handler{"/metrics": m.Handler()},
 	}
 
 	var wg sync.WaitGroup
@@ -99,6 +105,7 @@ func run(log *slog.Logger) error {
 	start(dispatcher.Run)
 	start(publisher.Run)
 	start(func(ctx context.Context) { cleanupIdempotencyKeys(ctx, st, cfg.IdempotencyTTL, log) })
+	start(func(ctx context.Context) { sampleGauges(ctx, rc, dispatcher, m) })
 
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -137,6 +144,22 @@ func cleanupIdempotencyKeys(ctx context.Context, st *store.Store, ttl time.Durat
 		} else if n > 0 {
 			log.Info("idempotency keys expired", "deleted", n)
 		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func sampleGauges(ctx context.Context, rc *cache.Cache, d *dispatch.Service, m *metrics.Metrics) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		if n, err := rc.AvailableCount(ctx); err == nil {
+			m.AvailableVehicles(n)
+		}
+		m.QueueDepth(d.QueueDepth())
 		select {
 		case <-ctx.Done():
 			return
